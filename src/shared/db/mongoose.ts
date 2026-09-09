@@ -8,7 +8,8 @@ const cache = globalForMongo.mongooseConn ?? { conn: null, promise: null };
 globalForMongo.mongooseConn = cache;
 
 export async function connectDb() {
-  const uri = process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/petcare_reminders";
+  const uri = process.env.MONGODB_URI?.trim();
+  if (!uri) throw new Error("MONGODB_URI is missing. Set it in .env");
   if (cache.conn) return cache.conn;
   if (!cache.promise) {
     cache.promise = mongoose.connect(uri, { bufferCommands: false });

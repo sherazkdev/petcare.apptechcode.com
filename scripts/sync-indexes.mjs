@@ -1,6 +1,35 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import mongoose from "mongoose";
 
-const uri = process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/petcare_reminders";
+function loadEnvFile() {
+  const file = resolve(process.cwd(), ".env");
+  if (!existsSync(file)) return;
+  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq < 1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] == null) process.env[key] = value.replace(/\\n/g, "\n");
+  }
+}
+
+loadEnvFile();
+
+const uri = process.env.MONGODB_URI?.trim();
+if (!uri) {
+  throw new Error("MONGODB_URI is missing. Set it in .env");
+}
+
+console.log("Connecting:", uri.replace(/:[^:@/]+@/, ":****@"));
 await mongoose.connect(uri);
 
 const db = mongoose.connection.db;

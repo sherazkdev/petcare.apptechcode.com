@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "indexes": "node scripts/sync-indexes.mjs"
+    "indexes": "node --env-file=.env scripts/sync-indexes.mjs"
   },
   "dependencies": {
     "firebase-admin": "^14.3.0",
