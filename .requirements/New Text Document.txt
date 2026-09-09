@@ -1,0 +1,526 @@
+# Pet Care App — FCM Reminder Backend Spec
+
+This document is the source of truth for backend work.  
+Reminders must be delivered with **Firebase Cloud Messaging (FCM)**. Do not rely on the phone scheduling the alarm.
+
+---
+
+## 1. Goal
+
+When a user saves a reminder in the app, the backend must:
+
+1. Store that reminder.
+2. Schedule a job for `remindAt`.
+3. At that exact time, send an FCM push to that device.
+4. If the reminder is edited, completed, or deleted before that time, cancel the job so no push is sent.
+
+The Flutter app is currently **local-first (Hive)**. There is **no login / no user account**. Identity is per-install `deviceId`.
+
+---
+
+## 2. Firebase project (use this one)
+
+| Item | Value |
+|---|---|
+| Firebase project ID | `pet-care-app-37e12` |
+| Android package | `com.pettracker.timetopet.petcare` |
+| Android `mobilesdk_app_id` | `1:249510850365:android:84398887773dc2fb46df54` |
+
+Send FCM only with **Firebase Admin SDK** on the server, using a service account from this same project.
+
+Do **not** send FCM from the mobile app.
+
+---
+
+## 3. End-to-end flow
+
+```
+App launch
+  → get FCM token
+  → POST /v1/devices/fcm-token
+
+User taps Save Reminder
+  → app saves locally (Hive)
+  → POST /v1/reminders
+  → backend stores row + schedules job at remindAt (UTC)
+
+Clock reaches remindAt
+  → worker loads reminder (must still be scheduled)
+  → worker loads latest fcmToken for that deviceId
+  → FCM send (notification + data, priority high)
+  → status = sent
+
+User taps notification
+  → app opens Reminders screen
+  → app can POST /v1/reminders/{id}/complete
+
+User edits reminder time
+  → PUT /v1/reminders/{id}
+  → cancel old job, schedule new job
+
+User deletes reminder / marks done early
+  → DELETE or POST complete
+  → cancel job, do not send FCM
+```
+
+---
+
+## 4. Auth / identity
+
+No JWT / no login for v1.
+
+Every request **must** include:
+
+```http
+X-Device-Id: <uuid-v4>
+Content-Type: application/json
+```
+
+Optional extra header (recommended):
+
+```http
+X-Api-Key: <server-issued-app-key>
+```
+
+Rules:
+
+- `X-Device-Id` is generated once on first app launch and reused forever on that install.
+- All reminders belong to that `deviceId`.
+- A client must not read / update / delete another `deviceId`’s reminders.
+- Later, when login is added, map `deviceId` → `userId`. Do not change these URLs.
+
+Return `401` if `X-Device-Id` is missing. Return `403` if the reminder does not belong to this device.
+
+---
+
+## 5. Timezone rules (critical)
+
+- Client always sends `remindAt` as **ISO-8601 with offset**, example:  
+  `2026-09-10T09:30:00+05:00`
+- Client also sends IANA timezone, example: `Asia/Karachi`
+- Backend **stores UTC** (`remindAtUtc`) and keeps original `timezone`
+- Job must fire at `remindAtUtc`, not at a naive local string
+- Do not assume server timezone is Pakistan
+- If `remindAt` is in the past → `400`
+
+---
+
+## 6. Data models
+
+### 6.1 Device
+
+| Field | Type | Notes |
+|---|---|---|
+| deviceId | string (uuid) | Primary key, from header |
+| fcmToken | string | Latest token only |
+| platform | `android` \| `ios` | |
+| timezone | string | IANA, e.g. `Asia/Karachi` |
+| locale | string | e.g. `en`, `ur` |
+| appVersion | string | e.g. `1.0.2` |
+| enabled | boolean | `false` if FCM token is dead |
+| updatedAt | datetime UTC | |
+
+One device = one current token. New token **replaces** the old one.
+
+### 6.2 Reminder
+
+Must match the app model:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| id | string (uuid) | yes | **Client-generated**. Same id in Hive and API. |
+| deviceId | string | yes | From header, not from body |
+| petId | string (uuid) | yes | |
+| petName | string | yes | Used in notification title |
+| title | string | yes | Max 80 chars |
+| notes | string \| null | no | Max 200 chars |
+| remindAt | ISO-8601 with offset | yes | Original client value |
+| remindAtUtc | datetime UTC | yes | Derived by server |
+| timezone | string | yes | IANA |
+| status | enum | yes | see below |
+| createdAt | datetime UTC | yes | |
+| updatedAt | datetime UTC | yes | |
+| completedAt | datetime UTC \| null | no | |
+| fcmMessageId | string \| null | no | From FCM send response |
+| jobId | string \| null | no | Cloud Task / queue id |
+
+**Status enum**
+
+| Status | Meaning |
+|---|---|
+| `scheduled` | Job is waiting. May send FCM. |
+| `sent` | FCM accepted by Firebase. |
+| `completed` | User marked done (app or notification tap). |
+| `cancelled` | Deleted or replaced by an update. |
+| `failed` | FCM send failed after retries. |
+
+Only `scheduled` reminders may be sent.
+
+Health-record reminders (vaccination, medication, grooming, dental) use **the same table and same APIs**. No extra endpoints.
+
+---
+
+## 7. APIs
+
+Base path: `/v1`  
+JSON only. UTF-8.
+
+### 7.1 Register or refresh FCM token
+
+`POST /v1/devices/fcm-token`
+
+App calls this:
+
+- on first launch after notification permission
+- every time FCM token refreshes
+- when timezone / locale changes
+
+**Request**
+
+```json
+{
+  "fcmToken": "dXyz...",
+  "platform": "android",
+  "timezone": "Asia/Karachi",
+  "appVersion": "1.0.2",
+  "locale": "en"
+}
+```
+
+**Validation**
+
+- `fcmToken` required, non-empty
+- `platform` must be `android` or `ios`
+
+**Behavior**
+
+- Upsert by `deviceId`
+- Replace previous token
+- Set `enabled = true`
+
+**Response `200`**
+
+```json
+{
+  "ok": true,
+  "deviceId": "8f3c-..."
+}
+```
+
+---
+
+### 7.2 Create reminder
+
+`POST /v1/reminders`
+
+**Request**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "petId": "pet-uuid",
+  "petName": "Pookie",
+  "title": "Vaccination",
+  "notes": "Bring booklet",
+  "remindAt": "2026-09-10T09:30:00+05:00",
+  "timezone": "Asia/Karachi"
+}
+```
+
+**Validation**
+
+| Rule | Error |
+|---|---|
+| `id` missing / not uuid | 400 |
+| `title` empty or > 80 | 400 |
+| `notes` > 200 | 400 |
+| `remindAt` not ISO-8601 with offset | 400 |
+| `remindAt` in the past | 400 |
+| same `id` already exists for this device | 409 |
+
+**Behavior**
+
+1. Insert reminder with `status = scheduled`
+2. Create **one** delayed job at `remindAtUtc`
+3. Store `jobId`
+
+**Response `201`**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "scheduled",
+  "remindAtUtc": "2026-09-10T04:30:00Z"
+}
+```
+
+This call is **idempotent on `id`**: if the same body is posted again with the same id and same `remindAt`, return `200` with the existing row. If id exists with different data → `409` (client should use PUT).
+
+---
+
+### 7.3 Update reminder
+
+`PUT /v1/reminders/{id}`
+
+Same body as create (without forcing a new id).
+
+**Behavior**
+
+1. 404 if not found or not owned by this `deviceId`
+2. If status is `sent` or `completed` → `409` (cannot reschedule a fired reminder; client should create a new one)
+3. Cancel old job
+4. Update fields
+5. Set `status = scheduled`
+6. Schedule new job
+
+**Response `200`** — same shape as create.
+
+---
+
+### 7.4 Delete reminder
+
+`DELETE /v1/reminders/{id}`
+
+**Behavior**
+
+1. 404 if not owned by this device
+2. Cancel job if still `scheduled`
+3. Set `status = cancelled` **or** hard-delete (either is fine; cancelling the job is mandatory)
+4. Do not send FCM
+
+**Response `204`** (empty body)
+
+---
+
+### 7.5 Mark complete
+
+`POST /v1/reminders/{id}/complete`
+
+Called when the user marks the reminder done in the app, including after tapping the notification.
+
+**Behavior**
+
+1. Cancel job if still `scheduled`
+2. `status = completed`
+3. `completedAt = now UTC`
+
+**Response `200`**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "completed"
+}
+```
+
+---
+
+### 7.6 List reminders (optional but recommended)
+
+`GET /v1/reminders?status=scheduled`
+
+Used after reinstall / data restore.
+
+**Response `200`**
+
+```json
+{
+  "items": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "petId": "pet-uuid",
+      "petName": "Pookie",
+      "title": "Vaccination",
+      "notes": "Bring booklet",
+      "remindAt": "2026-09-10T09:30:00+05:00",
+      "remindAtUtc": "2026-09-10T04:30:00Z",
+      "timezone": "Asia/Karachi",
+      "status": "scheduled",
+      "createdAt": "2026-09-09T07:00:00Z"
+    }
+  ]
+}
+```
+
+Only return this `deviceId`’s rows.
+
+---
+
+## 8. Scheduler (required)
+
+Saving in DB is not enough. You must run a delayed job.
+
+**Preferred:** Google Cloud Tasks with `scheduleTime = remindAtUtc`  
+**OK:** Redis delayed queue (BullMQ / Sidekiq)  
+**Last resort:** poll DB every 30 seconds for due `scheduled` rows (`remindAtUtc <= now`)
+
+Job handler:
+
+1. Load reminder by id.
+2. If status ≠ `scheduled` → exit (no send).
+3. Load device. If missing / `enabled = false` / no token → mark `failed`, exit.
+4. Send FCM.
+5. Success → `status = sent`, store `fcmMessageId`.
+6. Retry **2 times** on timeout / 5xx (wait 30s, then 2 min).
+7. If FCM returns token invalid (`UNREGISTERED`, `INVALID_ARGUMENT` for token) → set device `enabled = false`, reminder `failed`. Do not keep retrying that token.
+
+**One reminder = one FCM.** No repeat. No daily recurrence in v1.
+
+---
+
+## 9. FCM payload (must match exactly)
+
+Channel id on Android **must** be:
+
+```text
+pet_reminders_channel
+```
+
+### 9.1 Title / body
+
+- Title: `🐾 {petName} Reminder`
+- Body: `{title}`  
+  If `notes` is not empty, body = `{title}\n{notes}`
+
+### 9.2 Message
+
+```json
+{
+  "token": "<device.fcmToken>",
+  "notification": {
+    "title": "🐾 Pookie Reminder",
+    "body": "Vaccination"
+  },
+  "data": {
+    "type": "pet_reminder",
+    "reminderId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "petId": "pet-uuid",
+    "petName": "Pookie",
+    "title": "Vaccination"
+  },
+  "android": {
+    "priority": "HIGH",
+    "ttl": "86400s",
+    "notification": {
+      "channelId": "pet_reminders_channel",
+      "clickAction": "FLUTTER_NOTIFICATION_CLICK"
+    }
+  },
+  "apns": {
+    "headers": {
+      "apns-priority": "10"
+    },
+    "payload": {
+      "aps": {
+        "sound": "default",
+        "badge": 1
+      }
+    }
+  }
+}
+```
+
+**Rules**
+
+- Send **both** `notification` and `data`.
+- All `data` values must be **strings** (FCM requirement).
+- `type` must always be `pet_reminder` so the app can ignore other pushes.
+- `android.priority` must be `HIGH` so Samsung / Android 16 can wake the device.
+- Do not use silent data-only messages for reminders. Those are delayed or dropped.
+
+---
+
+## 10. Error format
+
+All errors:
+
+```json
+{
+  "error": {
+    "code": "REMIND_AT_IN_PAST",
+    "message": "remindAt must be in the future"
+  }
+}
+```
+
+| HTTP | code | When |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | Bad body |
+| 400 | `REMIND_AT_IN_PAST` | Time already passed |
+| 401 | `MISSING_DEVICE_ID` | No `X-Device-Id` |
+| 403 | `FORBIDDEN` | Reminder belongs to another device |
+| 404 | `NOT_FOUND` | Unknown id |
+| 409 | `CONFLICT` | Duplicate id / cannot update sent reminder |
+| 500 | `INTERNAL` | Unexpected |
+
+---
+
+## 11. What the Flutter app will do
+
+Listed so backend does not invent extra fields.
+
+1. Add `firebase_messaging`.
+2. Create Android notification channel `pet_reminders_channel`.
+3. Register token → `POST /v1/devices/fcm-token`.
+4. On add reminder → local Hive save + `POST /v1/reminders`.
+5. On edit → Hive update + `PUT /v1/reminders/{id}`.
+6. On delete / mark done → Hive update + `DELETE` or `POST complete`.
+7. On notification tap, read `data.reminderId` and `data.petId`, open Reminders, call complete.
+8. If API fails (offline), app retries later. Backend must accept idempotent create by `id`.
+
+Backend should **not** wait for the app to be open. Push must arrive with app killed.
+
+---
+
+## 12. Out of scope for v1
+
+Do not build these unless asked:
+
+- User login / OTP / social auth
+- Recurring reminders (daily / weekly)
+- Sending to multiple devices of one user
+- Email / SMS
+- Changing reminder content from admin panel
+- Exact-alarm / foreground-service / battery-exemption APIs (not needed for FCM)
+
+---
+
+## 13. Acceptance tests for backend
+
+Backend is done when these pass:
+
+1. Register token for device A. Create reminder 2 minutes ahead. Device A receives the push at that time with app **killed**.
+2. Create reminder, then `DELETE` before time. **No** push arrives.
+3. Create reminder, `PUT` to a new time. Push arrives at the **new** time only.
+4. Create reminder, `POST complete` before time. **No** push arrives.
+5. Tap payload contains `type=pet_reminder`, `reminderId`, `petId`.
+6. Request without `X-Device-Id` → 401.
+7. Device B cannot GET/PUT/DELETE device A’s reminder → 403/404.
+8. Invalid FCM token is stored as `enabled=false` and not retried forever.
+9. `remindAt` in the past → 400 `REMIND_AT_IN_PAST`.
+10. Notification title is `🐾 {petName} Reminder`.
+
+---
+
+## 14. Checklist for backend developer
+
+- [ ] Same Firebase project `pet-care-app-37e12`
+- [ ] Admin SDK service account on server
+- [ ] Device upsert by `X-Device-Id`
+- [ ] Reminder CRUD with client-generated UUID
+- [ ] UTC storage + delayed job
+- [ ] Cancel job on update / delete / complete
+- [ ] FCM payload exactly as section 9
+- [ ] Channel id `pet_reminders_channel`
+- [ ] High priority Android
+- [ ] Error JSON as section 10
+- [ ] Share base URL + (optional) `X-Api-Key` with the app team
+
+When this checklist is done, send the app team:
+
+```text
+BASE_URL=
+X_API_KEY=   (if used)
+```
+
+App-side FCM wiring starts after that.
