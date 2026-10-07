@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
-    const { deviceId } = requireDeviceContext(request);
+    const { deviceId } = await requireDeviceContext(request);
     const body = await request.json();
     const result = await createReminder(deviceId, body);
     return Response.json(result.body, { status: result.status });

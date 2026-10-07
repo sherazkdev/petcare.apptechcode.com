@@ -1,7 +1,10 @@
+import { verifyFirebaseIdToken } from "@/shared/firebase/admin";
 import { ApiError } from "@/shared/http/errors";
 
 export type DeviceContext = {
   deviceId: string;
+  /** Set when request includes a valid Firebase ID token. */
+  firebaseUid?: string;
 };
 
 const UUID_RE =
@@ -11,14 +14,60 @@ export function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
-export function requireDeviceContext(request: Request): DeviceContext {
+function envFlag(name: string): boolean {
+  const v = process.env[name];
+  return v === "true" || v === "1";
+}
+
+function readBearerToken(request: Request): string | null {
+  const header = request.headers.get("authorization")?.trim();
+  if (!header) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  const token = match?.[1]?.trim();
+  return token || null;
+}
+
+function assertLegacyApiKey(request: Request): void {
   const apiKey = process.env.X_API_KEY;
-  if (apiKey) {
-    const given = request.headers.get("x-api-key");
-    if (given !== apiKey) {
-      throw new ApiError(401, "MISSING_DEVICE_ID", "Invalid or missing X-Api-Key");
+  if (!apiKey) return;
+  const given = request.headers.get("x-api-key");
+  if (given !== apiKey) {
+    throw new ApiError(401, "MISSING_DEVICE_ID", "Invalid or missing X-Api-Key");
+  }
+}
+
+async function assertFirebaseAuth(request: Request): Promise<string | undefined> {
+  const tokenRequired = envFlag("FIREBASE_ID_TOKEN_REQUIRED");
+  const allowLegacyApiKey = envFlag("ALLOW_LEGACY_API_KEY");
+  const bearer = readBearerToken(request);
+
+  if (bearer) {
+    try {
+      const { uid } = await verifyFirebaseIdToken(bearer);
+      return uid;
+    } catch {
+      throw new ApiError(401, "INVALID_AUTH_TOKEN", "Invalid or expired Firebase ID token");
     }
   }
+
+  if (tokenRequired) {
+    if (allowLegacyApiKey) {
+      assertLegacyApiKey(request);
+      return undefined;
+    }
+    throw new ApiError(
+      401,
+      "INVALID_AUTH_TOKEN",
+      "Authorization Bearer Firebase ID token is required",
+    );
+  }
+
+  assertLegacyApiKey(request);
+  return undefined;
+}
+
+export async function requireDeviceContext(request: Request): Promise<DeviceContext> {
+  const firebaseUid = await assertFirebaseAuth(request);
 
   const deviceId = request.headers.get("x-device-id")?.trim() ?? "";
   if (!deviceId) {
@@ -27,5 +76,5 @@ export function requireDeviceContext(request: Request): DeviceContext {
   if (!isUuid(deviceId)) {
     throw new ApiError(400, "VALIDATION_ERROR", "X-Device-Id must be a UUID");
   }
-  return { deviceId };
+  return { deviceId, firebaseUid };
 }

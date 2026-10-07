@@ -1,33 +1,84 @@
-# Pet Care — Reminder Push API (simplified)
+# Pet Care Reminder API — Developer guide
 
-Base path: `/api/v1`  
-Local example: `http://localhost:3000/api/v1`
+Live base: `https://petcare.apptechcode.com`  
+Swagger: [https://petcare.apptechcode.com/docs](https://petcare.apptechcode.com/docs)  
+OpenAPI JSON: `GET /api/v1/openapi`
 
-App reminders stay on the phone (Hive). Backend is **only** for FCM:
+Reminders **Hive mein phone pe** rehti hain. Backend **sirf FCM** ke liye hai:
 
-1. Save FCM token
-2. On **add** → schedule push at `remindAt`
-3. On **edit** → cancel old job, schedule new time
-4. On **delete / mark done** → cancel job so push is not sent
-
-Do **not** send `timezone`, `appVersion`, or `locale`.  
-`remindAt` already includes the timezone offset.
-
----
-
-## Headers (every request)
-
-| Header | Required | Example |
+| App action | API call | Backend kya karta hai |
 | --- | --- | --- |
-| `X-Device-Id` | Yes | UUID, same for that phone install |
-| `X-Api-Key` | If server has `X_API_KEY` | Same as env |
-| `Content-Type` | Yes on JSON | `application/json` |
+| App open / token refresh | `POST /api/v1/devices/fcm-token` | Token save |
+| Add reminder | `POST /api/v1/reminders` | Us time pe push schedule |
+| Edit reminder | `PUT /api/v1/reminders/{id}` | Purana job cancel, naya time |
+| Delete | `DELETE /api/v1/reminders/{id}` | Job cancel, **push nahi** |
+| Mark done | `POST /api/v1/reminders/{id}/complete` | Job cancel, **push nahi** |
 
-No login. All reminders belong to `X-Device-Id`.
+**List reminders API nahi hai.** App apni Hive list dikhati hai.
+
+**Mat bhejo:** `timezone`, `appVersion`, `locale`, alag `date` / `time`. Time sirf `remindAt` mein (offset ke sath).
 
 ---
 
-## Errors
+## 1. Headers (har API pe)
+
+Query params nahi. Identity **headers** se aati hai.
+
+| Header | Required | Type | Kaise set karo |
+| --- | --- | --- | --- |
+| `X-Device-Id` | **Hamesha yes** | UUID | Pehli launch pe generate karo, SharedPreferences / Hive mein save, **us install pe hamesha wahi**. FCM token nahi hai. |
+| `Authorization` | **Yes** jab server pe `FIREBASE_ID_TOKEN_REQUIRED=true` | `Bearer <Firebase ID token>` | `FirebaseAuth.instance.currentUser` se `getIdToken()` — har API call se pehle fresh token lo. |
+| `X-Api-Key` | **Legacy** — sirf jab server allow kare | string | Remote Config se hata dena jab Firebase token live ho; phir server pe key **rotate**. |
+| `Content-Type` | JSON body wali calls pe **yes** | `application/json` | Token, add, edit pe. Delete / complete pe body nahi to optional. |
+
+Example (production / audit):
+
+```
+X-Device-Id: 8f3c9a10-4b21-4d6e-9c11-2a7b8d5e6f70
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+Content-Type: application/json
+```
+
+UUID format (RFC): `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`  
+Galat / missing `X-Device-Id` → `401` ya `400`.  
+Missing / galat Firebase token (jab required) → `401` `INVALID_AUTH_TOKEN`.  
+Galat legacy `X-Api-Key` → `401`.  
+Dusre phone ki reminder → `403`.
+
+**Server env (deploy):** `FIREBASE_ID_TOKEN_REQUIRED=true`, `ALLOW_LEGACY_API_KEY=false` audit ke mutabiq. Migration ke dauran purani app ke liye `ALLOW_LEGACY_API_KEY=true` rakho, phir app update ke baad band karo.
+
+Ek device = ek `X-Device-Id`. Token register aur reminder **same UUID** se.
+
+---
+
+## 2. `remindAt` kaise banao
+
+Screen pe user **date + time** choose karta hai. API ko **ek string** do.
+
+Format: ISO-8601 **offset ke sath** (Z ya `+05:00`).
+
+| Theek | Galat |
+| --- | --- |
+| `2026-09-10T09:30:00+05:00` | `2026-09-10 09:30` |
+| `2026-09-10T04:30:00Z` | `09:30` (sirf time) |
+| | `2026-09-10T09:30:00` (offset nahi) |
+
+Pakistan: `+05:00`. Server isko UTC mein convert karta hai.
+
+**Future** hona zaroori hai. Past → `400 REMIND_AT_IN_PAST`.
+
+Dart example:
+
+```dart
+final remindAt = DateTime(
+  date.year, date.month, date.day, time.hour, time.minute,
+).toLocal().toIso8601String();
+// ensure offset: e.g. 2026-09-10T09:30:00.000+05:00
+```
+
+---
+
+## 3. Error shape (sab endpoints)
 
 ```json
 {
@@ -38,28 +89,39 @@ No login. All reminders belong to `X-Device-Id`.
 }
 ```
 
-| HTTP | `error.code` |
-| --- | --- |
-| 400 | `VALIDATION_ERROR` |
-| 400 | `REMIND_AT_IN_PAST` |
-| 401 | `MISSING_DEVICE_ID` |
-| 403 | `FORBIDDEN` |
-| 404 | `NOT_FOUND` |
-| 409 | `CONFLICT` |
-| 500 | `INTERNAL` |
+| HTTP | `code` | Matlab |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | Header / body galat |
+| 400 | `REMIND_AT_IN_PAST` | Time past hai |
+| 401 | `MISSING_DEVICE_ID` | `X-Device-Id` missing **ya** legacy `X-Api-Key` galat |
+| 401 | `INVALID_AUTH_TOKEN` | Firebase Bearer missing / expire / invalid |
+| 403 | `FORBIDDEN` | Reminder is device ki nahi |
+| 404 | `NOT_FOUND` | `id` nahi mila |
+| 409 | `CONFLICT` | Duplicate id (alag time) **ya** sent/completed edit |
+| 500 | `INTERNAL` | Server error |
 
 ---
 
-## 1. Register FCM token
+## 4. Register FCM token
+
+**Kab:** App launch, aur jab Firebase naya token de.
 
 `POST /api/v1/devices/fcm-token`
 
-**Body**
+### Path / query params
 
-| Field | Type | Required |
-| --- | --- | --- |
-| `fcmToken` | string | Yes |
-| `platform` | `"android"` \| `"ios"` | Yes |
+Koi nahi.
+
+### Headers
+
+`X-Device-Id`, `X-Api-Key`, `Content-Type`
+
+### Body params
+
+| Field | Type | Required | Rules |
+| --- | --- | --- | --- |
+| `fcmToken` | string | Yes | Firebase Messaging token. Empty nahi. |
+| `platform` | string | Yes | Sirf `"android"` ya `"ios"` |
 
 ```json
 {
@@ -68,7 +130,9 @@ No login. All reminders belong to `X-Device-Id`.
 }
 ```
 
-**Response `200`**
+Naya token **purane ko replace** karta hai (usi `X-Device-Id` pe).
+
+### Response `200`
 
 ```json
 {
@@ -77,24 +141,34 @@ No login. All reminders belong to `X-Device-Id`.
 }
 ```
 
-Upsert by `X-Device-Id`. New token **replaces** the old one.
+`deviceId` header wala UUID hai.
 
 ---
 
-## 2. Add reminder (schedule FCM)
+## 5. Add reminder (schedule push)
+
+**Kab:** User Save (naya reminder). Pehle Hive mein save, **wahi UUID** API `id` mein bhejo.
 
 `POST /api/v1/reminders`
 
-**Body**
+### Path / query params
 
-| Field | Type | Required | Rules |
-| --- | --- | --- | --- |
-| `id` | string (UUID) | Yes | Client-generated. Same id as in the app. |
-| `petId` | string | Yes | Selected pet id |
-| `petName` | string | Yes | Selected pet’s name (FCM title `🐾 {petName} Reminder`) |
-| `title` | string | Yes | 1–80 chars |
-| `notes` | string \| null | No | Max 200. Empty notes → `null` or omit |
-| `remindAt` | string | Yes | ISO-8601 **with offset**, future. Example: `2026-09-10T09:30:00+05:00` |
+Koi nahi.
+
+### Headers
+
+`X-Device-Id`, `X-Api-Key`, `Content-Type`
+
+### Body params
+
+| Field | Type | Required | Screen se | Rules |
+| --- | --- | --- | --- | --- |
+| `id` | UUID string | Yes | Form pe nahi. App generate kare (Hive id). | Valid UUID |
+| `petId` | string | Yes | Selected pet | Empty nahi |
+| `petName` | string | Yes | Selected pet **name** (user type nahi) | Push title: `🐾 {petName} Reminder` |
+| `title` | string | Yes | Title field | 1–80 chars |
+| `notes` | string \| null | No | Notes | Max 200. Empty → omit ya `null` |
+| `remindAt` | string | Yes | Date + time milake | ISO + offset, future |
 
 ```json
 {
@@ -107,7 +181,9 @@ Upsert by `X-Device-Id`. New token **replaces** the old one.
 }
 ```
 
-**Response `201`**
+### Response
+
+**`201`** naya schedule:
 
 ```json
 {
@@ -117,24 +193,40 @@ Upsert by `X-Device-Id`. New token **replaces** the old one.
 }
 ```
 
-Same `id` + same `remindAt` → `200` (idempotent).  
-Same `id` + different `remindAt` → `409 CONFLICT` (use PUT).
+**`200`** — same `id` + **same** `remindAt` dobara (idempotent, doosri job nahi).  
+**`409 CONFLICT`** — same `id` + **alag** `remindAt` → edit ke liye **PUT** use karo.
 
 ---
 
-## 3. Edit reminder (reschedule FCM)
+## 6. Edit reminder (reschedule)
+
+**Kab:** User time / pet / title / notes change kare.
 
 `PUT /api/v1/reminders/{id}`
 
-**Body**
+### Path params
 
-| Field | Type | Required |
-| --- | --- | --- |
-| `petId` | string | Yes |
-| `petName` | string | Yes |
-| `title` | string | Yes |
-| `notes` | string \| null | No |
-| `remindAt` | string (ISO with offset, future) | Yes |
+| Param | Where | Required | Value |
+| --- | --- | --- | --- |
+| `id` | URL | Yes | Wahi UUID jo add pe bheja tha |
+
+Example: `PUT /api/v1/reminders/a1b2c3d4-e5f6-7890-abcd-ef1234567890`
+
+### Query params
+
+Koi nahi.
+
+### Body params
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `petId` | string | Yes | |
+| `petName` | string | Yes | |
+| `title` | string | Yes | 1–80 |
+| `notes` | string \| null | No | Max 200 |
+| `remindAt` | string | Yes | Future, ISO + offset |
+
+Body mein **`id` mat bhejo** — path mein hai.
 
 ```json
 {
@@ -146,30 +238,54 @@ Same `id` + different `remindAt` → `409 CONFLICT` (use PUT).
 }
 ```
 
-Cancels the old job and schedules a new one. Status = `scheduled`.  
-Cannot update if `sent` or `completed` → `409`.
+### Response `200`
 
-**Response `200`** — same shape as create.
+Create jaisa: `{ "id", "status": "scheduled", "remindAtUtc" }`
+
+`sent` ya `completed` edit → `409`.  
+Nahi mila → `404`. Dusra device → `403`.
 
 ---
 
-## 4. Delete reminder (cancel FCM)
+## 7. Delete reminder (push cancel)
+
+**Kab:** User delete.
 
 `DELETE /api/v1/reminders/{id}`
 
-Cancel the pending job. Status `cancelled`. No FCM.
+### Path params
 
-**Response `204`** empty body.
+| Param | Required |
+| --- | --- |
+| `id` | Yes (UUID) |
+
+### Body
+
+Koi nahi.
+
+### Response `204`
+
+Empty body. Job cancel. FCM nahi jayegi.
 
 ---
 
-## 5. Mark complete (cancel FCM)
+## 8. Mark complete (push cancel)
+
+**Kab:** User done / notification ke baad complete.
 
 `POST /api/v1/reminders/{id}/complete`
 
-No body. If still `scheduled`, cancel the job. Status = `completed`.
+### Path params
 
-**Response `200`**
+| Param | Required |
+| --- | --- |
+| `id` | Yes (UUID) |
+
+### Body
+
+Koi nahi.
+
+### Response `200`
 
 ```json
 {
@@ -178,16 +294,56 @@ No body. If still `scheduled`, cancel the job. Status = `completed`.
 }
 ```
 
+Agar abhi `scheduled` thi to job cancel.
+
 ---
 
-## App will call
+## 9. Phone pe FCM kya aayega
 
-| User action | API |
+App FCM **send nahi** karti. Server bhejta hai `remindAt` pe **ek dafa**.
+
+Notification:
+
+- Title: `🐾 Pookie Reminder`
+- Body: `Vaccination` ya `Vaccination\nBring booklet` (agar notes hon)
+
+Data (strings):
+
+| Key | Example |
 | --- | --- |
-| App open | `POST /api/v1/devices/fcm-token` |
-| Save new reminder | `POST /api/v1/reminders` |
-| Edit reminder | `PUT /api/v1/reminders/{id}` |
-| Delete reminder | `DELETE /api/v1/reminders/{id}` |
-| Mark done | `POST /api/v1/reminders/{id}/complete` |
+| `type` | `pet_reminder` |
+| `reminderId` | add wala UUID |
+| `petId` | pet id |
+| `petName` | `Pookie` |
+| `title` | `Vaccination` |
 
-Removed: `timezone`, `appVersion`, `locale`, `GET /api/v1`, `GET /api/v1/reminders`.
+Android channel: `pet_reminders_channel`  
+Package: `com.pettracker.timetopet.petcare`
+
+Tap → Reminders screen. Phir optionally `POST .../complete`.
+
+---
+
+## 10. Status (server; app list API se nahi leti)
+
+| Status | Matlab |
+| --- | --- |
+| `scheduled` | Push abhi bhej sakte hain |
+| `sent` | FCM accept |
+| `completed` | User done |
+| `cancelled` | Delete |
+| `failed` | FCM fail / invalid token |
+
+---
+
+## 11. Flutter checklist
+
+1. Install pe UUID generate + save (`X-Device-Id`).
+2. Launch: Firebase token → `POST /devices/fcm-token` (`fcmToken` + `platform`).
+3. Add: Hive save + `POST /reminders` with same `id`, `remindAt` with `+05:00`.
+4. Edit: Hive update + `PUT /reminders/{id}` (body mein `id` nahi).
+5. Delete: Hive delete + `DELETE /reminders/{id}`.
+6. Done: Hive complete + `POST /reminders/{id}/complete`.
+7. `timezone` / `locale` / `appVersion` **mat bhejo**.
+
+Swagger Try it out: [https://petcare.apptechcode.com/docs](https://petcare.apptechcode.com/docs) → Authorize → `X-Device-Id` + Firebase Bearer (ya legacy `X-Api-Key`).

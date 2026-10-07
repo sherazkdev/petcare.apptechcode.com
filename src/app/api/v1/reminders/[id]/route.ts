@@ -8,7 +8,7 @@ type RouteCtx = { params: Promise<{ id: string }> };
 
 export async function PUT(request: Request, context: RouteCtx) {
   try {
-    const { deviceId } = requireDeviceContext(request);
+    const { deviceId } = await requireDeviceContext(request);
     const { id } = await context.params;
     const body = await request.json();
     const result = await updateReminder(deviceId, id, body);
@@ -20,7 +20,7 @@ export async function PUT(request: Request, context: RouteCtx) {
 
 export async function DELETE(request: Request, context: RouteCtx) {
   try {
-    const { deviceId } = requireDeviceContext(request);
+    const { deviceId } = await requireDeviceContext(request);
     const { id } = await context.params;
     await deleteReminder(deviceId, id);
     return new Response(null, { status: 204 });

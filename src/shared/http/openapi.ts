@@ -4,7 +4,7 @@ export const openApiSpec = {
     title: "Pet Care Reminder Push API",
     version: "1.0.0",
     description:
-      "Backend is only for FCM. App stores reminders in Hive. Headers: X-Device-Id (required UUID), X-Api-Key (if server has X_API_KEY).",
+      "Backend is only for FCM. App stores reminders in Hive. Headers: X-Device-Id (required UUID), Authorization Bearer Firebase ID token (when FIREBASE_ID_TOKEN_REQUIRED), optional legacy X-Api-Key.",
   },
   servers: [
     { url: "https://petcare.apptechcode.com", description: "Production" },
@@ -26,7 +26,13 @@ export const openApiSpec = {
         type: "apiKey",
         in: "header",
         name: "X-Api-Key",
-        description: "Required when X_API_KEY is set on the server.",
+        description: "Legacy shared key when ALLOW_LEGACY_API_KEY or FIREBASE_ID_TOKEN_REQUIRED=false.",
+      },
+      FirebaseBearer: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT",
+        description: "Firebase Auth ID token from the app (FirebaseAuth.instance.currentUser.getIdToken()).",
       },
     },
     schemas: {
@@ -42,6 +48,7 @@ export const openApiSpec = {
                   "VALIDATION_ERROR",
                   "REMIND_AT_IN_PAST",
                   "MISSING_DEVICE_ID",
+                  "INVALID_AUTH_TOKEN",
                   "FORBIDDEN",
                   "NOT_FOUND",
                   "CONFLICT",
@@ -101,7 +108,7 @@ export const openApiSpec = {
       },
     },
   },
-  security: [{ DeviceId: [], ApiKey: [] }],
+  security: [{ DeviceId: [], FirebaseBearer: [] }],
   paths: {
     "/api/v1/devices/fcm-token": {
       post: {

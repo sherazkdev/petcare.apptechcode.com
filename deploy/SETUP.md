@@ -11,7 +11,9 @@ cp .env.example .env
 nano .env
 # FCM_DRY_RUN=false
 # MONGODB_URI=...
-# X_API_KEY=...
+# FIREBASE_ID_TOKEN_REQUIRED=true
+# ALLOW_LEGACY_API_KEY=false   # true only while old app builds still use X-Api-Key
+# X_API_KEY=...                # optional when Firebase ID token is required; rotate after removing from Remote Config
 # FIREBASE_CLIENT_EMAIL=...
 # FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 

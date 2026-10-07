@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    const { deviceId } = requireDeviceContext(request);
+    const { deviceId } = await requireDeviceContext(request);
     const { id } = await context.params;
     const result = await completeReminder(deviceId, id);
     return Response.json(result);

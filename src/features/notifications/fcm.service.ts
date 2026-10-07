@@ -29,26 +29,10 @@ function payloadFor(reminder: ReminderDoc, token: string) {
   };
 }
 
-function firebaseServiceAccount() {
-  const projectId = process.env.FIREBASE_PROJECT_ID ?? "pet-care-app-37e12";
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
-  if (!clientEmail || !privateKey) {
-    throw new Error("FIREBASE_CLIENT_EMAIL or FIREBASE_PRIVATE_KEY is missing");
-  }
-  return { projectId, clientEmail, privateKey };
-}
-
 async function sendWithAdmin(reminder: ReminderDoc, token: string): Promise<FcmResult> {
-  const account = firebaseServiceAccount();
-  const { cert, getApps, initializeApp } = await import("firebase-admin/app");
+  const { getFirebaseApp } = await import("@/shared/firebase/admin");
   const { getMessaging } = await import("firebase-admin/messaging");
-  if (!getApps().length) {
-    initializeApp({
-      credential: cert(account),
-      projectId: account.projectId,
-    });
-  }
+  await getFirebaseApp();
 
   try {
     const messageId = await getMessaging().send(payloadFor(reminder, token));
