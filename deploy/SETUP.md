@@ -13,7 +13,7 @@ nano .env
 # MONGODB_URI=...
 # FIREBASE_ID_TOKEN_REQUIRED=true
 # ALLOW_LEGACY_API_KEY=false   # true only while old app builds still use X-Api-Key
-# X_API_KEY=...                # optional when Firebase ID token is required; rotate after removing from Remote Config
+# X_API_KEY=                   # leave empty / unset in production (null) — do not use shared API key
 # FIREBASE_CLIENT_EMAIL=...
 # FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 
@@ -31,6 +31,9 @@ pm2 startup
 # App listens on 3018 (see ecosystem.config.cjs).
 # Restart after code pull:
 # git pull && npm ci && npm run build && pm2 restart petcare-reminder-api
+
+# Smoke (production — need Firebase ID token from app):
+# SMOKE_FIREBASE_ID_TOKEN="<getIdToken()>" node --env-file=.env scripts/smoke-local.mjs https://petcare.apptechcode.com
 
 # 5) Nginx
 sudo cp nginx/petcare.apptechcode.com.conf /etc/nginx/sites-available/petcare.apptechcode.com
